@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  myskillguru-backend:
+    build: .
+    container_name: myskillguru-backend
+    ports:
+      - "5051:5051"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - lms-shared
+
+networks:
+  lms-shared:
+    external: true

@@ -1,0 +1,51 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+motor==3.6.0
+pymongo==4.9.2
+pydantic==2.10.4
+pydantic-settings==2.7.0
+PyJWT==2.10.1
+bcrypt==4.2.1
+python-dotenv==1.0.1
+python-multipart==0.0.20
+
+# Phase 2 — exams / evaluation / answer sheets
+google-genai==1.15.0
+python-docx==1.1.2
+python-pptx==0.6.23
+openpyxl==3.1.5
+requests==2.32.3
+imagekitio==4.0.1
+
+# Phase 3a — AI tutor / homework help / notes generation
+anthropic==0.45.2
+redis==5.0.4
+playwright==1.49.1
+
+# Phase 3b — AI question-paper generation
+beautifulsoup4==4.12.3
+Pillow==10.4.0
+mammoth==1.8.0
+
+# Phase 5a — Excel marks import / mock tests
+pandas==2.1.4
+
+# Phase 5b — relative grading / subject & combined results
+xlsxwriter==3.2.0
+
+# Phase 3c — diagram-rendering engine (question-paper generation)
+matplotlib==3.9.0
+schemdraw==0.19
+numpy==1.26.4
+asteval==1.0.3
+
+# Phase 5c — academic transcripts (PDF certificates/transcripts)
+reportlab==5.0.0
+
+# Phase 8 — AI Tutor v1 (unused-by-frontend, ported for endpoint parity)
+pdfplumber==0.11.6
+PyPDF2==3.0.1
+markdown2
+
+# Phase 9 — hybrid RAG (course-material grounding for roadmap generation)
+qdrant-client==1.12.1
