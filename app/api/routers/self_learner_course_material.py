@@ -32,9 +32,10 @@ from app.core.rate_limit import ai_rate_limit
 from app.db.mongodb import get_database
 from app.models.ai_usage_event import Feature, Provider
 from app.services.ai_usage import record_ai_usage
-from app.services.gemini import extract_text_from_file, generate_content_from_file
+from app.services.gemini import extract_text_from_file
 from app.services.job_store import get_job, set_job, update_job
 from app.services.rag import mongo_store, singletons, structure_parser, tree_index
+from app.services.rag.pdf_extract import extract_pdf_text
 from app.services.rag.schemas import DocType, DocumentRecord, SourceFormat, new_id
 from app.services.rag.vector_store import chunk_text
 
@@ -53,12 +54,6 @@ _EXT_TO_FORMAT = {
     "md": SourceFormat.MD, "txt": SourceFormat.TXT,
 }
 
-_PDF_EXTRACT_PROMPT = (
-    "Extract ALL text from this course document PDF with high accuracy. "
-    "Preserve the original structure including section headings, numbering, and tables. "
-    "Return plain text only. Do not use markdown."
-)
-
 
 def _file_ext(filename: str) -> str:
     return (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
@@ -69,7 +64,7 @@ def _file_ext(filename: str) -> str:
 # ============================================================
 
 async def _run_ingest_job(
-    job_id: str, file_bytes: bytes, filename: str, mime_type: str,
+    job_id: str, file_bytes: bytes, filename: str,
     course_title: Optional[str], course_code: Optional[str], user_id: str,
     job_prefix: str = SL_CM_JOB_PREFIX,
 ) -> None:
@@ -93,13 +88,23 @@ async def _run_ingest_job(
         source_format = _EXT_TO_FORMAT.get(ext, SourceFormat.TXT)
 
         if ext == "pdf":
-            text, extract_usage = await asyncio.to_thread(
-                generate_content_from_file, file_bytes, mime_type or "application/pdf", _PDF_EXTRACT_PROMPT,
-            )
+            # Local-first: pdfplumber pulls the text layer straight out of
+            # the PDF, no LLM call, no token limit — covers the large
+            # majority of uploads (typed syllabi, exported docs, digital
+            # textbooks). Gemini OCR is only invoked for pages that come
+            # back empty (scanned/image-only), and even then batched a few
+            # pages at a time so no single call risks Gemini's 65,536-token
+            # output cap regardless of total document length.
+            text, extract_usage, extract_truncated = await asyncio.to_thread(extract_pdf_text, file_bytes)
             await record_ai_usage(
                 db, user_id=user_id, provider=Provider.GEMINI, model="gemini-2.5-flash",
                 feature=Feature.RAG_INGEST_EXTRACTION, usage=extract_usage, job_id=job_id,
             )
+            if extract_truncated:
+                logger.warning(
+                    "course_material ingest: doc_id=%s OCR extraction hit Gemini's output-token cap on at "
+                    "least one page batch — extracted text for those pages may be incomplete", job_id,
+                )
         else:
             text = await asyncio.to_thread(extract_text_from_file, file_bytes, filename)
 
@@ -191,7 +196,7 @@ async def upload_course_material(
 
     background_tasks.add_task(
         _run_ingest_job, job_id, file_bytes, file.filename or "upload",
-        file.content_type or "", course_title, course_code, identity["user_id"],
+        course_title, course_code, identity["user_id"],
         SL_CM_JOB_PREFIX,
     )
 

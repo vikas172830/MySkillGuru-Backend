@@ -241,25 +241,20 @@ def extract_question_paper_text_with_gemini(file_bytes: bytes, filename: str = "
     return text, _parse_token_usage(getattr(response, "usage_metadata", None))
 
 
-def generate_content_from_file(
-    file_bytes: bytes, mime_type: str, prompt: str, model: str = "gemini-2.5-flash"
-) -> Tuple[str, dict]:
+def _call_generate_content_with_retry(client: genai.Client, model: str, contents: list):
     """
-    Send file bytes (PDF/image) directly to Gemini with a prompt, with retry/backoff on
-    transient errors (503/UNAVAILABLE/429/RESOURCE_EXHAUSTED/quota), up to 5 attempts,
-    honoring a "Please retry in Ns" hint from the API when present.
+    Shared retry/backoff for Gemini generate_content calls: up to 5 attempts on
+    transient errors (503/UNAVAILABLE/429/RESOURCE_EXHAUSTED/quota), honoring a
+    "Please retry in Ns" hint from the API when present. Returns the raw response
+    object (not just text) so callers that need finish_reason/candidates — e.g.
+    pdf_extract.py's truncation detection — can inspect it directly.
 
-    Blocking call — run via asyncio.to_thread() from async callers. Shared by both the
-    homework-help and notes-generation pipelines (Flask only had this retry logic on the
-    homework path; consolidating makes notes-generation equally robust for free).
+    Blocking — call via asyncio.to_thread() from async callers.
     """
-    client = _get_client()
-    file_part = genai_types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-
     response = None
     for attempt in range(5):
         try:
-            response = client.models.generate_content(model=model, contents=[file_part, prompt])
+            response = client.models.generate_content(model=model, contents=contents)
             break
         except Exception as e:
             error_text = str(e)
@@ -288,6 +283,22 @@ def generate_content_from_file(
 
     if response is None:
         raise RuntimeError("Gemini service unavailable after 5 retries.")
+
+    return response
+
+
+def generate_content_from_file(
+    file_bytes: bytes, mime_type: str, prompt: str, model: str = "gemini-2.5-flash"
+) -> Tuple[str, dict]:
+    """
+    Send file bytes (PDF/image) directly to Gemini with a prompt. Blocking call —
+    run via asyncio.to_thread() from async callers. Shared by both the
+    homework-help and notes-generation pipelines (Flask only had this retry logic on the
+    homework path; consolidating makes notes-generation equally robust for free).
+    """
+    client = _get_client()
+    file_part = genai_types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+    response = _call_generate_content_with_retry(client, model, [file_part, prompt])
 
     text = ""
     try:

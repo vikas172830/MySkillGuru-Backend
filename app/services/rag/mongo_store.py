@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -80,31 +79,6 @@ async def find_document_by_id(db: AsyncIOMotorDatabase, doc_id: str) -> Optional
     if not doc:
         return None
     return _to_document_record(doc)
-
-
-async def find_document_for_subject(db: AsyncIOMotorDatabase, subject: str) -> Optional[DocumentRecord]:
-    """
-    Called before roadmap/notes generation: given the user-typed `subject`,
-    find a matching uploaded course material (case-insensitive substring
-    match on course_title/course_code — swap for a real search index once
-    you have more than a handful of uploads).
-    """
-    if not subject:
-        return None
-    pattern = re.escape(subject)  # subject is free user text — must not be interpreted as a regex
-    doc = await db.courseMaterials.find_one({
-        "$or": [
-            {"course_title": {"$regex": pattern, "$options": "i"}},
-            {"course_code": {"$regex": pattern, "$options": "i"}},
-        ]
-    })
-    if not doc:
-        logger.info("find_document_for_subject: no match for subject=%r", subject)
-        return None
-    record = _to_document_record(doc)
-    logger.info("find_document_for_subject: matched subject=%r -> doc_id=%s (course_title=%r)",
-                subject, record.id, record.course_title)
-    return record
 
 
 async def save_tree(db: AsyncIOMotorDatabase, doc_id: str, nodes: List[TreeNode]) -> None:

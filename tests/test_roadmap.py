@@ -1,11 +1,10 @@
 import json
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from bson import ObjectId
 
 from app.api.routers.roadmap import (
     _build_roadmap_pdf_html,
-    _ground_new_roadmap,
     _resolve_grounding,
     _week_status_for_pdf,
 )
@@ -30,7 +29,6 @@ _CLAUDE_JSON_PATCH = "app.api.routers.roadmap.generate_claude_json"
 _CLAUDE_TEXT_PATCH = "app.services.roadmap_ai.generate_claude_text"
 _PDF_RENDER_PATCH = "app.api.routers.roadmap.render_html_to_pdf"
 _FIND_BY_ID_PATCH = "app.services.rag.mongo_store.find_document_by_id"
-_FIND_BY_SUBJECT_PATCH = "app.services.rag.mongo_store.find_document_for_subject"
 _RAG_RETRIEVE_PATCH = "app.services.rag.retrieval.router.retrieve"
 _RAG_SHOULD_USE_PATCH = "app.services.rag.retrieval.router.should_use_rag"
 
@@ -108,6 +106,91 @@ async def test_create_roadmap_queues_job(client_factory, test_db):
         resp = await learner.post("/api/self-learner/roadmap", json={"subject": "Math"})
     assert resp.status_code == 202
     assert resp.json()["status"] == "processing"
+
+
+async def test_create_roadmap_end_to_end_without_document_skips_grounding(client_factory, test_db):
+    """Full HTTP flow: POST create -> background job runs -> GET status returns
+    done with a real, persisted roadmap. No doc_id is attached (the common
+    case — most students never upload material), so this guards against the
+    bug just fixed: grounding lookups must be skipped entirely in that case,
+    never fall back to a cross-user subject-text scan."""
+    learner = await _learner(client_factory, test_db)
+
+    fake_curriculum = {
+        "subject_display_name": "Python",
+        "weeks": [{
+            "week": 1, "title": "Basics", "introDescription": "Getting started.",
+            "subtopics": [{"title": "Variables", "summary": "...", "keyPoints": [], "difficulty": "Beginner"}],
+        }],
+        "stats": {},
+    }
+    fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
+
+    with patch(_CURRICULUM_PATCH, return_value=(fake_curriculum, fake_usage, False)), \
+         patch(_FIND_BY_ID_PATCH) as mock_find_by_id:
+        create_resp = await learner.post(
+            "/api/self-learner/roadmap", json={"subject": "Python", "goal": "Interview Prep"},
+        )
+        assert create_resp.status_code == 202
+        job_id = create_resp.json()["job_id"]
+
+        status_resp = await learner.get(f"/api/self-learner/roadmap/status/{job_id}")
+
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["status"] == "done"
+    roadmap_id = body["roadmap_id"]
+
+    # No doc_id was attached -> grounding must be skipped entirely, never
+    # fall back to a cross-user document lookup.
+    mock_find_by_id.assert_not_called()
+
+    get_resp = await learner.get(f"/api/self-learner/roadmap/{roadmap_id}")
+    assert get_resp.status_code == 200
+    roadmap = get_resp.json()
+    assert roadmap["subject"] == "Python"
+    assert len(roadmap["weeks"]) == 1
+    assert roadmap["grounded_doc_id"] is None
+
+
+async def test_create_roadmap_end_to_end_with_document_grounds_via_explicit_doc_id(client_factory, test_db):
+    """Same full HTTP flow, but WITH a doc_id from a course-material upload the
+    student just did — the explicit-id path must still ground normally and
+    persist grounded_doc_id, unaffected by the no-fallback fix above."""
+    learner = await _learner(client_factory, test_db)
+
+    fake_curriculum = {
+        "subject_display_name": "Python",
+        "weeks": [{
+            "week": 1, "title": "Basics", "introDescription": "Getting started.",
+            "subtopics": [{"title": "Variables", "summary": "...", "keyPoints": [], "difficulty": "Beginner"}],
+        }],
+        "stats": {},
+    }
+    fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
+
+    with patch(_CURRICULUM_PATCH, return_value=(fake_curriculum, fake_usage, False)), \
+         patch(_FIND_BY_ID_PATCH, return_value=_FAKE_RECORD) as mock_find_by_id, \
+         patch(_RAG_RETRIEVE_PATCH, return_value=_fake_retrieval_result("grounded curriculum context")), \
+         patch(_RAG_SHOULD_USE_PATCH, return_value=True):
+        create_resp = await learner.post(
+            "/api/self-learner/roadmap",
+            json={"subject": "Python", "goal": "Interview Prep", "doc_id": _FAKE_RECORD.id},
+        )
+        assert create_resp.status_code == 202
+        job_id = create_resp.json()["job_id"]
+
+        status_resp = await learner.get(f"/api/self-learner/roadmap/status/{job_id}")
+
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["status"] == "done"
+
+    mock_find_by_id.assert_called_once_with(ANY, _FAKE_RECORD.id)
+
+    get_resp = await learner.get(f"/api/self-learner/roadmap/{body['roadmap_id']}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["grounded_doc_id"] == _FAKE_RECORD.id
 
 
 async def test_update_subtopic_requires_key(client_factory, test_db):
@@ -830,64 +913,35 @@ async def test_find_document_by_id_found_and_not_found(test_db):
 async def test_resolve_grounding_trusts_grounded_doc_id_when_present_and_valid(test_db):
     doc = {"grounded_doc_id": "doc-abc-123"}
     with patch(_FIND_BY_ID_PATCH, return_value=_FAKE_RECORD) as mock_by_id, \
-         patch(_FIND_BY_SUBJECT_PATCH) as mock_by_subject, \
          patch(_RAG_RETRIEVE_PATCH, return_value=_fake_retrieval_result("trusted grounding")), \
          patch(_RAG_SHOULD_USE_PATCH, return_value=True):
-        result = await _resolve_grounding(test_db, doc, "Python", "some query", "user-1")
+        result = await _resolve_grounding(test_db, doc, "some query", "user-1")
 
     assert result == "trusted grounding"
     mock_by_id.assert_called_once_with(test_db, "doc-abc-123")
-    mock_by_subject.assert_not_called()  # precise id hit -> no need for the fallback match
 
 
-async def test_resolve_grounding_falls_back_when_no_grounded_doc_id(test_db):
-    doc = {}  # no grounded_doc_id at all — legacy/ungrounded-at-creation roadmap
-    with patch(_FIND_BY_ID_PATCH) as mock_by_id, \
-         patch(_FIND_BY_SUBJECT_PATCH, return_value=_FAKE_RECORD) as mock_by_subject, \
-         patch(_RAG_RETRIEVE_PATCH, return_value=_fake_retrieval_result("subject-matched grounding")), \
-         patch(_RAG_SHOULD_USE_PATCH, return_value=True):
-        result = await _resolve_grounding(test_db, doc, "Python", "some query", "user-1")
+async def test_resolve_grounding_returns_none_when_no_grounded_doc_id(test_db):
+    """A roadmap that was never grounded in a document at creation time must
+    stay ungrounded — no subject-text fallback search across every student's
+    uploads. find_document_by_id should never even be called."""
+    doc = {}  # no grounded_doc_id at all
+    with patch(_FIND_BY_ID_PATCH) as mock_by_id:
+        result = await _resolve_grounding(test_db, doc, "some query", "user-1")
 
-    assert result == "subject-matched grounding"
+    assert result is None
     mock_by_id.assert_not_called()
-    mock_by_subject.assert_called_once()
 
 
-async def test_resolve_grounding_falls_back_when_grounded_doc_id_is_stale(test_db):
+async def test_resolve_grounding_returns_none_when_grounded_doc_id_is_stale(test_db):
     """The material behind grounded_doc_id was deleted since the roadmap was
     created — find_document_by_id correctly returns None, and that must
-    trigger the subject-match fallback rather than giving up ungrounded."""
+    resolve to ungrounded rather than falling back to a subject-text match."""
     doc = {"grounded_doc_id": "deleted-doc-id"}
     with patch(_FIND_BY_ID_PATCH, return_value=None) as mock_by_id, \
-         patch(_FIND_BY_SUBJECT_PATCH, return_value=_FAKE_RECORD) as mock_by_subject, \
-         patch(_RAG_RETRIEVE_PATCH, return_value=_fake_retrieval_result("fallback grounding")), \
-         patch(_RAG_SHOULD_USE_PATCH, return_value=True):
-        result = await _resolve_grounding(test_db, doc, "Python", "some query", "user-1")
+         patch(_RAG_RETRIEVE_PATCH) as mock_retrieve:
+        result = await _resolve_grounding(test_db, doc, "some query", "user-1")
 
-    assert result == "fallback grounding"
-    mock_by_id.assert_called_once()
-    mock_by_subject.assert_called_once()
-
-
-async def test_resolve_grounding_returns_none_when_nothing_matches(test_db):
-    doc = {}
-    with patch(_FIND_BY_SUBJECT_PATCH, return_value=None):
-        result = await _resolve_grounding(test_db, doc, "Obscure Subject", "query", "user-1")
     assert result is None
-
-
-async def test_ground_new_roadmap_returns_context_and_resolved_doc_id(test_db):
-    with patch(_FIND_BY_SUBJECT_PATCH, return_value=_FAKE_RECORD), \
-         patch(_RAG_RETRIEVE_PATCH, return_value=_fake_retrieval_result("new roadmap grounding")), \
-         patch(_RAG_SHOULD_USE_PATCH, return_value=True):
-        context_text, doc_id = await _ground_new_roadmap(test_db, "Python", "query", "user-1")
-
-    assert context_text == "new roadmap grounding"
-    assert doc_id == "doc-abc-123"
-
-
-async def test_ground_new_roadmap_returns_none_none_when_no_match(test_db):
-    with patch(_FIND_BY_SUBJECT_PATCH, return_value=None):
-        context_text, doc_id = await _ground_new_roadmap(test_db, "Obscure Subject", "query", "user-1")
-    assert context_text is None
-    assert doc_id is None
+    mock_by_id.assert_called_once()
+    mock_retrieve.assert_not_called()

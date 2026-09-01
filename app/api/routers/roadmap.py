@@ -298,52 +298,29 @@ async def _retrieve_grounding_context(db: AsyncIOMotorDatabase, record, query: s
 
 
 async def _resolve_grounding(
-    db: AsyncIOMotorDatabase, doc: Dict[str, Any], subject: str, query: str, user_id: str,
+    db: AsyncIOMotorDatabase, doc: Dict[str, Any], query: str, user_id: str,
 ) -> Optional[str]:
     """
     Best-effort RAG grounding lookup for any call site AFTER roadmap
     creation (notes, Auto Test, ...). Trusts `doc["grounded_doc_id"]`
     directly via one precise `_id` lookup — which also doubles as a
-    staleness check — when present and still valid; falls back to a
-    subject-text substring match only when there's no stored id or it's
-    gone stale (material deleted since). This keeps every generation call
-    for a given roadmap grounded in the SAME document it was created
-    against, instead of each call re-matching on subject text independently
-    (which has no uniqueness guarantee — a later-uploaded unrelated
-    material with an overlapping title could otherwise silently win).
-    Returns None (never raises) on any failure or when nothing usable
-    resolves — generation must always be able to fall back to ungrounded.
+    staleness check (returns None if the material was deleted since).
+    Deliberately does NOT fall back to a subject-text match: a roadmap that
+    was never grounded in a document at creation time must stay ungrounded,
+    never silently pick up an unrelated (possibly another student's)
+    upload that happens to share a subject substring. Returns None (never
+    raises) on any failure or when nothing usable resolves — generation
+    must always be able to fall back to ungrounded.
     """
+    grounded_doc_id = doc.get("grounded_doc_id")
+    if not grounded_doc_id:
+        return None
     try:
-        record = None
-        grounded_doc_id = doc.get("grounded_doc_id")
-        if grounded_doc_id:
-            record = await rag_mongo_store.find_document_by_id(db, grounded_doc_id)
-        if record is None:
-            record = await rag_mongo_store.find_document_for_subject(db, subject)
+        record = await rag_mongo_store.find_document_by_id(db, grounded_doc_id)
         return await _retrieve_grounding_context(db, record, query, user_id)
     except Exception as e:
         logging.warning("roadmap: RAG grounding lookup failed (falling back to ungrounded): %s", e)
         return None
-
-
-async def _ground_new_roadmap(db: AsyncIOMotorDatabase, subject: str, query: str, user_id: str) -> tuple:
-    """
-    Same resolution as `_resolve_grounding` but for roadmap CREATION, when
-    there's no existing document (and therefore no `grounded_doc_id`) to
-    trust yet. Resolves via subject-match and returns
-    (context_text, resolved_doc_id) so the new roadmap can persist
-    `grounded_doc_id` — every later grounding call for this roadmap
-    (notes, Auto Test, ...) then trusts that id directly via
-    `_resolve_grounding` instead of repeating this subject-match.
-    """
-    try:
-        record = await rag_mongo_store.find_document_for_subject(db, subject)
-        context_text = await _retrieve_grounding_context(db, record, query, user_id)
-        return context_text, (record.id if record else None)
-    except Exception as e:
-        logging.warning("roadmap: RAG grounding lookup failed at creation (falling back to ungrounded): %s", e)
-        return None, None
 
 
 # ============================================================
@@ -362,8 +339,9 @@ async def _run_create_roadmap_job(
         query = f"Curriculum structure, topics, and assessment weighting for: {subject} — {goal}"
         if doc_id:
             # Explicit doc_id from an upload the student just did this
-            # session — trust it directly, skip the subject substring
-            # lookup entirely (which has no uniqueness guarantee).
+            # session — trust it directly. No document was attached ->
+            # no grounding lookup at all (see _resolve_grounding's docstring
+            # for why there's deliberately no subject-text fallback).
             record = await rag_mongo_store.find_document_by_id(db, doc_id)
             if record is None:
                 logging.warning(
@@ -376,7 +354,7 @@ async def _run_create_roadmap_job(
                 grounded_doc_id = record.id
                 logging.info("roadmap job %s: using explicit doc_id=%s (doc_type=%s)", job_id, doc_id, record.doc_type.value)
         else:
-            grounding_context, grounded_doc_id = await _ground_new_roadmap(db, subject, query, user_id)
+            grounding_context, grounded_doc_id = None, None
 
         await update_job(ROADMAP_JOB_PREFIX, job_id, {"step": "Generating curriculum with AI…"})
 
@@ -684,7 +662,7 @@ async def get_subtopic_notes(
     key_points = subtopic.get("keyPoints", [])
 
     grounding_context = await _resolve_grounding(
-        db, doc, subject, f"{week_title} — {sub_title}: {sub_summary}", identity["user_id"],
+        db, doc, f"{week_title} — {sub_title}: {sub_summary}", identity["user_id"],
     )
     prompt = build_notes_prompt(
         subject, week_title, sub_title, sub_summary, key_points,
@@ -921,7 +899,7 @@ async def generate_auto_test(
     subtopic_names = [s.get("title", "") for s in week_data.get("subtopics", [])]
 
     grounding_context = await _resolve_grounding(
-        db, doc, subject, f"Assessment questions for {week_title}: {', '.join(subtopic_names)}", identity["user_id"],
+        db, doc, f"Assessment questions for {week_title}: {', '.join(subtopic_names)}", identity["user_id"],
     )
     prompt = build_auto_test_prompt(
         subject, week_title, subtopic_names, counts, payload.custom_prompt, grounding_context=grounding_context,
@@ -1062,7 +1040,7 @@ async def get_practice_questions(
         topic += f" (covers: {', '.join(key_points)})"
 
     grounding_context = await _resolve_grounding(
-        db, doc, doc.get("subject", ""), f"Practice questions for {sub_title}", identity["user_id"],
+        db, doc, f"Practice questions for {sub_title}", identity["user_id"],
     )
     prompt = build_practice_questions_prompt(topic, 10, grounding_context, doc.get("goal"))
 
