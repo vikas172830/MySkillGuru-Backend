@@ -77,6 +77,11 @@ async def _run_ingest_job(
         if existing:
             logger.info("course_material ingest: doc_id=%s is a duplicate of existing doc_id=%s (hash match)",
                         job_id, existing.id)
+            # Dedup is global (identity is the file's bytes), so the match may
+            # well belong to someone else. Uploading the file is what grants
+            # access — the uploader plainly holds it — and reusing the indexed
+            # copy skips a whole parse/summarize/embed pass.
+            await mongo_store.add_document_owner(db, existing.id, user_id)
             await update_job(job_prefix, job_id, {
                 "status": "done", "doc_id": existing.id, "duplicate": True, "step": "Already indexed",
             })
@@ -149,6 +154,7 @@ async def _run_ingest_job(
         record = DocumentRecord(
             id=doc_id, filename=filename, source_format=source_format, doc_type=doc_type,
             course_code=course_code, course_title=course_title, content_hash=content_hash,
+            owner_user_ids=[user_id],
         )
         await mongo_store.save_document_record(db, record)
 

@@ -59,6 +59,15 @@ class DocumentRecord:
     course_code: Optional[str] = None
     course_title: Optional[str] = None
     content_hash: Optional[str] = None  # sha256 of file bytes — true identity, independent of what course_title text was typed
+    # Everyone allowed to ground generation in this document. A set rather
+    # than a single owner because identity is the file's bytes: dedup stays
+    # global, so twenty students uploading the same standard textbook share
+    # one indexed document (one parse, one summarize/embed pass) instead of
+    # paying for twenty. Uploading bytes someone else already indexed adds
+    # you here; it never grants you sight of what they uploaded.
+    # Empty list = legacy record predating ownership — treated as
+    # inaccessible, see mongo_store.find_document_by_id.
+    owner_user_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

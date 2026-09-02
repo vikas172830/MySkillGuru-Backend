@@ -34,6 +34,10 @@ def _to_document_record(doc: dict) -> DocumentRecord:
     doc.pop("created_at", None)
     doc["doc_type"] = DocType(doc["doc_type"])
     doc["source_format"] = SourceFormat(doc["source_format"])
+    # Records written before ownership existed have no owner_user_ids field
+    # at all; let the dataclass default supply an empty list rather than
+    # raising on a missing kwarg.
+    doc.setdefault("owner_user_ids", [])
     return DocumentRecord(**doc)
 
 
@@ -64,7 +68,9 @@ async def find_document_by_hash(db: AsyncIOMotorDatabase, content_hash: str) -> 
     return _to_document_record(doc)
 
 
-async def find_document_by_id(db: AsyncIOMotorDatabase, doc_id: str) -> Optional[DocumentRecord]:
+async def find_document_by_id(
+    db: AsyncIOMotorDatabase, doc_id: str, owner_user_id: Optional[str] = None
+) -> Optional[DocumentRecord]:
     """
     Precise lookup by _id — lets a roadmap's stored `grounded_doc_id` be
     trusted directly instead of re-doing a subject-text match on every
@@ -72,13 +78,45 @@ async def find_document_by_id(db: AsyncIOMotorDatabase, doc_id: str) -> Optional
     here (not raising) also serves as the staleness check: if the material
     was deleted since the roadmap was created, callers fall back to the
     subject-match path automatically.
+
+    Pass owner_user_id whenever the doc_id came from the client. Roadmap
+    creation accepts one straight off the request body, so without this
+    check any caller could name another user's doc_id and read its contents
+    back out through generated notes, practice questions or auto-tests.
+    Access is deliberately expressed as "returns None" rather than an
+    exception so that path stays identical to a deleted or unknown document
+    — callers already fall back to ungrounded generation, and a distinct
+    error would tell an attacker their guessed id exists.
+
+    Legacy records carrying no owner_user_ids match no owner and so resolve
+    to None; scripts/backfill_course_material_owners.py recovers ownership
+    for every document a roadmap still references.
     """
     if not doc_id:
         return None
-    doc = await db.courseMaterials.find_one({"_id": doc_id})
+
+    query: dict = {"_id": doc_id}
+    if owner_user_id is not None:
+        query["owner_user_ids"] = owner_user_id
+
+    doc = await db.courseMaterials.find_one(query)
     if not doc:
         return None
     return _to_document_record(doc)
+
+
+async def add_document_owner(db: AsyncIOMotorDatabase, doc_id: str, user_id: str) -> None:
+    """
+    Grant user_id access to an already-indexed document. Called when an
+    upload dedups against existing bytes: the uploader clearly holds the
+    file, so they get access to the indexed copy, and the expensive
+    parse/summarize/embed work is not repeated. $addToSet keeps it
+    idempotent across repeat uploads by the same user.
+    """
+    if not doc_id or not user_id:
+        return
+    await db.courseMaterials.update_one({"_id": doc_id}, {"$addToSet": {"owner_user_ids": user_id}})
+    logger.info("document owner added doc_id=%s user_id=%s", doc_id, user_id)
 
 
 async def save_tree(db: AsyncIOMotorDatabase, doc_id: str, nodes: List[TreeNode]) -> None:

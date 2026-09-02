@@ -316,7 +316,11 @@ async def _resolve_grounding(
     if not grounded_doc_id:
         return None
     try:
-        record = await rag_mongo_store.find_document_by_id(db, grounded_doc_id)
+        # owner-scoped: grounded_doc_id was set from record.id at roadmap
+        # creation, but re-checking ownership here too means a doc whose
+        # access was later revoked (or that was never this user's) can never
+        # leak back in through an already-created roadmap.
+        record = await rag_mongo_store.find_document_by_id(db, grounded_doc_id, owner_user_id=user_id)
         return await _retrieve_grounding_context(db, record, query, user_id)
     except Exception as e:
         logging.warning("roadmap: RAG grounding lookup failed (falling back to ungrounded): %s", e)
@@ -342,11 +346,17 @@ async def _run_create_roadmap_job(
             # session — trust it directly. No document was attached ->
             # no grounding lookup at all (see _resolve_grounding's docstring
             # for why there's deliberately no subject-text fallback).
-            record = await rag_mongo_store.find_document_by_id(db, doc_id)
+            # owner-scoped: doc_id arrives straight off the request body, so
+            # without this a caller could name another user's document and
+            # read its contents back out through the notes, practice
+            # questions and auto-tests generated from it. An id they don't
+            # own resolves to None, indistinguishable from one that doesn't
+            # exist, and generation continues ungrounded.
+            record = await rag_mongo_store.find_document_by_id(db, doc_id, owner_user_id=user_id)
             if record is None:
                 logging.warning(
-                    "roadmap job %s: explicit doc_id=%s not found in courseMaterials — treating as ungrounded",
-                    job_id, doc_id,
+                    "roadmap job %s: explicit doc_id=%s not found in courseMaterials for this user — "
+                    "treating as ungrounded", job_id, doc_id,
                 )
                 grounding_context, grounded_doc_id = None, None
             else:

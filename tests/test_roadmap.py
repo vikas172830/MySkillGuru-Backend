@@ -186,7 +186,11 @@ async def test_create_roadmap_end_to_end_with_document_grounds_via_explicit_doc_
     body = status_resp.json()
     assert body["status"] == "done"
 
-    mock_find_by_id.assert_called_once_with(ANY, _FAKE_RECORD.id)
+    # owner_user_id=ANY: the explicit-doc_id path now scopes the lookup to
+    # the requesting learner (see roadmap.py) — closes an IDOR where a
+    # caller could name another user's doc_id and read its contents back
+    # out through the generated roadmap.
+    mock_find_by_id.assert_called_once_with(ANY, _FAKE_RECORD.id, owner_user_id=ANY)
 
     get_resp = await learner.get(f"/api/self-learner/roadmap/{body['roadmap_id']}")
     assert get_resp.status_code == 200
@@ -918,7 +922,10 @@ async def test_resolve_grounding_trusts_grounded_doc_id_when_present_and_valid(t
         result = await _resolve_grounding(test_db, doc, "some query", "user-1")
 
     assert result == "trusted grounding"
-    mock_by_id.assert_called_once_with(test_db, "doc-abc-123")
+    # owner_user_id="user-1": _resolve_grounding now re-checks ownership on
+    # every call rather than trusting a previously-stored grounded_doc_id
+    # unconditionally — defense in depth alongside the creation-time check.
+    mock_by_id.assert_called_once_with(test_db, "doc-abc-123", owner_user_id="user-1")
 
 
 async def test_resolve_grounding_returns_none_when_no_grounded_doc_id(test_db):

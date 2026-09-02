@@ -302,3 +302,82 @@ async def test_vector_retriever_skips_tracking_without_db_or_user_id():
     store = _FakeVectorStore(hits=[_FakeHit("c1", "chunk", 0.5)])
     result = await vector_retriever.retrieve("query", "doc1", store)
     assert result.confidence == 0.5
+
+
+# ---------------------------------------------------------------- document ownership
+#
+# Access to uploaded course material is scoped to its owners. Dedup stays
+# global (identity is the file's bytes), so ownership is a set: uploading a
+# file someone else already indexed adds you to it and reuses their indexed
+# copy, rather than paying for a second parse/summarize/embed pass.
+
+_OWNER = "507f1f77bcf86cd799439011"
+_STRANGER = "507f1f77bcf86cd799439012"
+
+
+async def _insert_material(test_db, doc_id: str, owners=None) -> None:
+    doc = {
+        "_id": doc_id,
+        "id": doc_id,
+        "filename": "syllabus.pdf",
+        "source_format": "pdf",
+        "doc_type": "structured",
+        "content_hash": f"hash-of-{doc_id}",
+    }
+    if owners is not None:
+        doc["owner_user_ids"] = owners
+    await test_db.courseMaterials.insert_one(doc)
+
+
+async def test_owner_can_resolve_own_document(test_db):
+    await _insert_material(test_db, "doc-owned", owners=[_OWNER])
+    found = await mongo_store.find_document_by_id(test_db, "doc-owned", owner_user_id=_OWNER)
+    assert found is not None
+    assert found.owner_user_ids == [_OWNER]
+
+
+async def test_stranger_cannot_resolve_another_users_document(test_db):
+    """The IDOR this closes: roadmap creation takes doc_id straight off the
+    request body, so an unowned id must resolve to None — indistinguishable
+    from one that doesn't exist, and generation continues ungrounded."""
+    await _insert_material(test_db, "doc-owned", owners=[_OWNER])
+    assert await mongo_store.find_document_by_id(test_db, "doc-owned", owner_user_id=_STRANGER) is None
+
+
+async def test_lookup_without_owner_arg_stays_unscoped(test_db):
+    """Internal callers that already established access don't pass an owner."""
+    await _insert_material(test_db, "doc-owned", owners=[_OWNER])
+    assert await mongo_store.find_document_by_id(test_db, "doc-owned") is not None
+
+
+async def test_legacy_document_without_owners_resolves_to_none(test_db):
+    """Records predating ownership have no owner_user_ids and match nobody;
+    scripts/backfill_course_material_owners.py recovers the ones roadmaps
+    still reference."""
+    await _insert_material(test_db, "doc-legacy")  # field absent entirely
+    assert await mongo_store.find_document_by_id(test_db, "doc-legacy", owner_user_id=_OWNER) is None
+
+    legacy = await mongo_store.find_document_by_id(test_db, "doc-legacy")
+    assert legacy is not None and legacy.owner_user_ids == []
+
+
+async def test_add_document_owner_is_idempotent_and_additive(test_db):
+    await _insert_material(test_db, "doc-shared", owners=[_OWNER])
+
+    await mongo_store.add_document_owner(test_db, "doc-shared", _STRANGER)
+    await mongo_store.add_document_owner(test_db, "doc-shared", _STRANGER)  # repeat upload
+
+    doc = await test_db.courseMaterials.find_one({"_id": "doc-shared"})
+    assert sorted(doc["owner_user_ids"]) == sorted([_OWNER, _STRANGER])
+
+    # Both parties can now resolve it; neither lost access.
+    assert await mongo_store.find_document_by_id(test_db, "doc-shared", owner_user_id=_OWNER) is not None
+    assert await mongo_store.find_document_by_id(test_db, "doc-shared", owner_user_id=_STRANGER) is not None
+
+
+async def test_dedup_stays_global_across_owners(test_db):
+    """find_document_by_hash must NOT be owner-scoped — that is what keeps a
+    shared textbook to a single indexing pass instead of one per student."""
+    await _insert_material(test_db, "doc-shared", owners=[_OWNER])
+    found = await mongo_store.find_document_by_hash(test_db, "hash-of-doc-shared")
+    assert found is not None and found.id == "doc-shared"
