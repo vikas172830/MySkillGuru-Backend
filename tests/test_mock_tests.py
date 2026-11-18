@@ -67,8 +67,8 @@ async def test_create_and_list_mock_test(client_factory, test_db):
 
     listed = await learner.get("/mock-tests")
     assert listed.status_code == 200
-    assert len(listed.json()["tests"]) == 1
-    assert listed.json()["tests"][0]["_id"] == test_id
+    assert len(listed.json()["mockTests"]) == 1
+    assert listed.json()["mockTests"][0]["_id"] == test_id
 
 
 async def test_get_mock_test_not_found(client_factory, test_db):

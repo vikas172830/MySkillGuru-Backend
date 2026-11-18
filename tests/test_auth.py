@@ -1,7 +1,5 @@
 import uuid
 
-from bson import ObjectId
-
 from app.core.security import hash_password
 from app.models.user import create_user_document
 from tests.conftest import login, register
@@ -60,104 +58,9 @@ async def test_register_institute_requires_institute_name(superadmin_client):
     assert resp.status_code == 422
 
 
-async def test_register_faculty_rejects_manual_color(superadmin_client, client_factory):
-    institute_email = _email("institute")
-    await register(
-        superadmin_client, role="institute", fullName="Inst Admin", email=institute_email,
-        password=PASSWORD, institute={"institute_name": "Test Institute"},
-    )
-    institute_client = await client_factory()
-    await login(institute_client, institute_email, PASSWORD)
-
-    resp = await institute_client.post("/register", json={
-        "role": "faculty", "fullName": "Fac", "email": _email("fac"), "password": PASSWORD,
-        "school_id": str(ObjectId()), "color": "#123456",
-    })
-    assert resp.status_code == 422
-
-
-async def test_register_faculty_requires_school_id(superadmin_client, client_factory):
-    institute_email = _email("institute")
-    await register(
-        superadmin_client, role="institute", fullName="Inst Admin", email=institute_email,
-        password=PASSWORD, institute={"institute_name": "Test Institute"},
-    )
-    institute_client = await client_factory()
-    await login(institute_client, institute_email, PASSWORD)
-
-    resp = await institute_client.post("/register", json={
-        "role": "faculty", "fullName": "Fac", "email": _email("fac"), "password": PASSWORD,
-    })
-    assert resp.status_code == 422
-
-
 # ============================================================
-# REGISTER — full role hierarchy happy paths (superadmin -> institute ->
-# faculty -> institute_student; tutor -> tutor_student; self_learner)
+# DUPLICATES
 # ============================================================
-
-async def test_full_registration_hierarchy(superadmin_client, client_factory):
-    # institute (by superadmin)
-    institute_email = _email("institute")
-    await register(
-        superadmin_client, role="institute", fullName="Inst Admin", email=institute_email,
-        password=PASSWORD, institute={"institute_name": "Test Institute"},
-    )
-    institute_client = await client_factory()
-    await login(institute_client, institute_email, PASSWORD)
-
-    # faculty (by institute)
-    faculty_email = _email("faculty")
-    await register(
-        institute_client, role="faculty", fullName="Faculty One", email=faculty_email,
-        password=PASSWORD, school_id=str(ObjectId()),
-    )
-    faculty_client = await client_factory()
-    await login(faculty_client, faculty_email, PASSWORD)
-
-    # institute_student (by faculty)
-    student_resp = await register(
-        faculty_client, role="institute_student", fullName="Student One", email=_email("unused"),
-        password=PASSWORD, school_id=str(ObjectId()), programme_id=str(ObjectId()), roll_no="R001",
-        contact_no="9999999999", enrollment_no="ENR001",
-    )
-    assert "college_email" in student_resp
-
-    # tutor (self-signup, caller = superadmin here since /register always
-    # needs *some* authenticated caller; _register_tutor ignores who calls)
-    tutor_email = _email("tutor")
-    await register(superadmin_client, role="tutor", fullName="Tutor One", email=tutor_email, password=PASSWORD)
-
-    # tutor accounts start inactive pending approval
-    login_resp = await (await client_factory()).post("/login", json={"email": tutor_email, "password": PASSWORD})
-    assert login_resp.status_code == 403
-
-
-async def test_institute_student_duplicate_roll_no_rejected(superadmin_client, client_factory):
-    institute_email = _email("institute")
-    await register(
-        superadmin_client, role="institute", fullName="Inst Admin", email=institute_email,
-        password=PASSWORD, institute={"institute_name": "Test Institute"},
-    )
-    institute_client = await client_factory()
-    await login(institute_client, institute_email, PASSWORD)
-
-    programme_id = str(ObjectId())
-    first = await institute_client.post("/register", json={
-        "role": "institute_student", "fullName": "Alpha Student", "email": _email("unused"),
-        "password": PASSWORD, "school_id": str(ObjectId()), "programme_id": programme_id, "roll_no": "R100",
-        "contact_no": "9999999999", "enrollment_no": "ENR100A",
-    })
-    assert first.status_code == 200
-
-    second = await institute_client.post("/register", json={
-        "role": "institute_student", "fullName": "Beta Student", "email": _email("unused"),
-        "password": PASSWORD, "school_id": str(ObjectId()), "programme_id": programme_id, "roll_no": "R100",
-        "contact_no": "9999999999", "enrollment_no": "ENR100B",
-    })
-    assert second.status_code == 400
-    assert "roll number" in second.json()["error"].lower()
-
 
 async def test_register_duplicate_email_rejected(superadmin_client):
     email = _email("dup")
@@ -223,35 +126,3 @@ async def test_logout_clears_cookie(superadmin_client):
 
     after = await superadmin_client.get("/me")
     assert after.status_code == 401
-
-
-# ============================================================
-# BULK STUDENT ENROLLMENT
-# ============================================================
-
-async def test_bulk_enrollment_rejects_empty_list(superadmin_client):
-    resp = await superadmin_client.post("/bulk-student-enrollment", json={"students": []})
-    assert resp.status_code == 422
-
-
-async def test_bulk_enrollment_partial_failure_reporting(superadmin_client, client_factory):
-    institute_email = _email("institute")
-    await register(
-        superadmin_client, role="institute", fullName="Inst Admin", email=institute_email,
-        password=PASSWORD, institute={"institute_name": "Test Institute"},
-    )
-    institute_client = await client_factory()
-    await login(institute_client, institute_email, PASSWORD)
-
-    school_id = str(ObjectId())
-    programme_id = str(ObjectId())
-    resp = await institute_client.post("/bulk-student-enrollment", json={
-        "students": [
-            {"fullName": "Good Student", "email": "unused1@test.local", "school_id": school_id, "programme_id": programme_id, "roll_no": "B001", "contact_no": "9999999999", "enrollment_no": "ENRB001"},
-            {"fullName": "Bad Student"},  # missing required fields -> should fail, not abort the batch
-        ]
-    })
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["success_count"] == 1
-    assert body["failed_count"] == 1

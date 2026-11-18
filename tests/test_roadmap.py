@@ -295,7 +295,7 @@ async def test_notes_generates_and_caches_per_style_and_difficulty(client_factor
     fake_notes = {"summary": "Variables hold values.", "detailedExplanation": [], "keyPoints": []}
     fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
 
-    with patch(_CLAUDE_JSON_PATCH, return_value=(fake_notes, fake_usage, False)) as mock_gen:
+    with patch(_GEMINI_JSON_PATCH, return_value=(fake_notes, fake_usage, False)) as mock_gen:
         # Auditory-dominant, Difficult
         resp = await learner.get(
             f"/api/self-learner/roadmap/{roadmap_id}/notes",
@@ -333,6 +333,35 @@ async def test_notes_generates_and_caches_per_style_and_difficulty(client_factor
         assert resp3.json()["cached"] is False
         assert resp3.json()["style"] == "Visual"
         assert mock_gen.call_count == 2
+
+
+class _QuotaError(Exception):
+    code = 429  # what is_gemini_quota_error() looks for
+
+
+async def test_notes_fall_back_to_claude_when_gemini_quota_is_exhausted(client_factory, test_db):
+    learner = await _learner(client_factory, test_db)
+    roadmap_id = await _seed_roadmap(test_db, str((await test_db["users"].find_one({"role": 7}))["_id"]))
+    fake_notes = {"summary": "From Claude.", "detailedExplanation": [], "keyPoints": []}
+    fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
+
+    with patch(_GEMINI_JSON_PATCH, side_effect=_QuotaError("quota")),          patch(_CLAUDE_JSON_PATCH, return_value=(fake_notes, fake_usage, False)) as claude:
+        resp = await learner.get(f"/api/self-learner/roadmap/{roadmap_id}/notes", params={"week": 1, "subtopic_idx": 0})
+
+    assert resp.status_code == 200
+    assert resp.json()["notes"]["summary"] == "From Claude."
+    assert claude.call_count == 1
+
+
+async def test_notes_do_not_fall_back_on_a_non_quota_gemini_error(client_factory, test_db):
+    learner = await _learner(client_factory, test_db)
+    roadmap_id = await _seed_roadmap(test_db, str((await test_db["users"].find_one({"role": 7}))["_id"]))
+
+    with patch(_GEMINI_JSON_PATCH, side_effect=RuntimeError("boom")), patch(_CLAUDE_JSON_PATCH) as claude:
+        resp = await learner.get(f"/api/self-learner/roadmap/{roadmap_id}/notes", params={"week": 1, "subtopic_idx": 0})
+
+    assert resp.status_code == 502
+    assert claude.call_count == 0
 
 
 def test_notes_prompt_exposes_only_supported_interactive_blocks():
@@ -535,17 +564,27 @@ def test_visual_aid_accepts_a_marketing_metrics_table():
     assert validated["interactiveLesson"]["visualAid"]["kind"] == "table"
 
 
-def test_visual_aid_rejects_grid_rows_with_wrong_dimensions():
+def test_visual_aid_repairs_grid_rows_with_wrong_dimensions():
     lesson = _valid_guided_lesson()
     lesson["visualAid"] = {
         "kind": "grid",
-        "title": "Broken grid",
-        "purpose": "This grid has mismatched dimensions.",
+        "title": "Short row",
+        "purpose": "This grid has a row shorter than its headers.",
         "columnHeaders": ["Column 0", "Column 1"],
         "rows": [{"label": "Row 0", "values": ["Only one value"]}],
         "interactionPrompt": "Select a cell.",
-        "caption": "This should not be shown.",
+        "caption": "Padded to match the headers.",
     }
+
+    validated = validate_interactive_lesson({"interactiveLesson": lesson})
+
+    # Cosmetic row/column mismatches are padded rather than costing the whole lesson.
+    assert validated["interactiveLesson"]["visualAid"]["rows"][0]["values"] == ["Only one value", ""]
+
+
+def test_unrepairable_visual_aid_omits_the_interactive_lesson():
+    lesson = _valid_guided_lesson()
+    lesson["visualAid"] = {"kind": "not-a-real-kind", "title": "Broken"}
 
     validated = validate_interactive_lesson({"interactiveLesson": lesson})
 
@@ -616,7 +655,7 @@ async def test_notes_visual_dominant_repairs_invalid_diagram(client_factory, tes
     fake_notes = {"summary": "...", "conceptDiagram": _BROKEN_DIAGRAM}
     fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
 
-    with patch(_CLAUDE_JSON_PATCH, return_value=(fake_notes, fake_usage, False)), \
+    with patch(_GEMINI_JSON_PATCH, return_value=(fake_notes, fake_usage, False)), \
          patch(_CLAUDE_TEXT_PATCH, return_value=(_VALID_DIAGRAM, fake_usage)) as mock_repair:
         resp = await learner.get(
             f"/api/self-learner/roadmap/{roadmap_id}/notes",
@@ -636,7 +675,7 @@ async def test_notes_visual_dominant_drops_diagram_when_repair_also_fails(client
     fake_notes = {"summary": "...", "conceptDiagram": _BROKEN_DIAGRAM}
     fake_usage = type("Usage", (), {"input_tokens": 10, "output_tokens": 20})()
 
-    with patch(_CLAUDE_JSON_PATCH, return_value=(fake_notes, fake_usage, False)), \
+    with patch(_GEMINI_JSON_PATCH, return_value=(fake_notes, fake_usage, False)), \
          patch(_CLAUDE_TEXT_PATCH, return_value=(_BROKEN_DIAGRAM, fake_usage)):
         resp = await learner.get(
             f"/api/self-learner/roadmap/{roadmap_id}/notes",

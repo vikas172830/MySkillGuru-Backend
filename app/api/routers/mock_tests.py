@@ -247,7 +247,7 @@ async def _create_roadmap_test(
     subtopic_names = [s.get("title", "") for w in weeks_in_range for s in w.get("subtopics", [])]
 
     grounding_context = await _resolve_grounding(
-        db, roadmap_doc, subject, f"Assessment questions for {week_title}: {', '.join(subtopic_names)}", user_id,
+        db, roadmap_doc, f"Assessment questions for {week_title}: {', '.join(subtopic_names)}", user_id,
     )
     prompt = build_auto_test_prompt(
         subject, week_title, subtopic_names, counts, payload.custom_prompt, grounding_context=grounding_context,
