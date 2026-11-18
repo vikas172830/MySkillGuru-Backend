@@ -27,11 +27,15 @@ def verify_password(password: str, password_hash: str) -> bool:
 # ============================================================
 
 def create_access_token(identity: str, additional_claims: dict | None = None) -> str:
-    now = datetime.now(timezone.utc)
+    # iat/exp as float (sub-second) timestamps, not whole-second datetimes: the
+    # token-revocation check in app.api.deps.get_current_identity compares a
+    # token's iat against a logout cutoff, and whole-second resolution let a
+    # token issued and revoked in the same second slip through.
+    now_ts = datetime.now(timezone.utc).timestamp()
     payload = {
         "sub": identity,
-        "iat": now,
-        "exp": now + timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS),
+        "iat": now_ts,
+        "exp": now_ts + settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         **(additional_claims or {}),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

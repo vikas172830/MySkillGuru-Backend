@@ -19,7 +19,7 @@ from starlette.responses import JSONResponse
 
 from app.api.deps import get_current_identity
 from app.core.config import settings
-from app.core.redis_client import get_redis
+from app.core.redis_client import get_redis, prefixed
 
 WINDOW_SECONDS = 60
 
@@ -34,6 +34,7 @@ async def _increment(key: str) -> int:
     acceptable tradeoff for the same reason the existing token counters in
     app/utils/token_usage.py accept eventual-consistency-shaped edges."""
     redis = get_redis()
+    key = prefixed(key)
     count = await redis.incr(key)
     if count == 1:
         await redis.expire(key, WINDOW_SECONDS)

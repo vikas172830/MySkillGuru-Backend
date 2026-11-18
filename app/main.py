@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.rate_limit import GlobalRateLimitMiddleware
 from app.core.redis_client import close_redis_connection, connect_to_redis
 from app.db.mongodb import close_mongo_connection, connect_to_mongo, get_database, ping_mongo
+from app.db.indexes import ensure_indexes
 from app.services.ai_usage import ensure_ai_usage_indexes
 
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +46,8 @@ async def lifespan(app: FastAPI):
     connect_to_mongo()
     await ping_mongo()
     await ensure_ai_usage_indexes(get_database())
-    connect_to_redis()
+    await ensure_indexes(get_database())
+    await connect_to_redis()
     yield
     await close_redis_connection()
     close_mongo_connection()

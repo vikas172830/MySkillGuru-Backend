@@ -1,9 +1,16 @@
+import logging
+
 import jwt
 from bson import ObjectId
 from fastapi import Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.core.redis_client import (
+    get_cached_account_state,
+    set_cached_account_state,
+    tokens_revoked_after,
+)
 from app.core.security import decode_access_token
 from app.db.mongodb import get_database
 from app.models.user import SELF_LEARNER
@@ -12,7 +19,10 @@ from app.models.user import SELF_LEARNER
 # IDENTITY (equivalent to @jwt_required() + get_jwt_identity()/get_jwt())
 # ============================================================
 
-def get_current_identity(request: Request) -> dict:
+async def get_current_identity(
+    request: Request,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> dict:
     token = request.cookies.get(settings.JWT_COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authentication token")
@@ -25,10 +35,49 @@ def get_current_identity(request: Request) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
-    if not user_id:
+    if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    return {"user_id": user_id, "role": payload.get("role")}
+    # A valid signature is not enough on its own: the account must still
+    # exist and be active, and the token must not predate a logout or
+    # password change. Account state is cached in Redis briefly so this isn't
+    # a Mongo round-trip per request; Redis/Mongo errors fail OPEN.
+    state = await _resolve_account_state(db, user_id)
+    if state.get("blocked"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive")
+
+    cutoff = await tokens_revoked_after(user_id)
+    if cutoff is not None:
+        iat = payload.get("iat", 0)
+        if isinstance(iat, (int, float)) and iat < cutoff:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
+
+    return {"user_id": user_id, "role": payload.get("role", state.get("role"))}
+
+
+async def _resolve_account_state(db: AsyncIOMotorDatabase, user_id: str) -> dict:
+    cached = await get_cached_account_state(user_id)
+    if cached is not None:
+        return cached
+
+    try:
+        user = await db["users"].find_one(
+            {"_id": ObjectId(user_id)},
+            {"is_active": 1, "is_deleted": 1, "role": 1},
+        )
+    except Exception:
+        logging.warning("get_current_identity: users lookup failed for %s — failing open", user_id)
+        return {}  # unknown state, not treated as blocked
+
+    if not user:
+        state = {"blocked": True}
+    else:
+        state = {
+            "blocked": user.get("is_deleted") is True or not user.get("is_active", True),
+            "role": user.get("role"),
+        }
+    await set_cached_account_state(user_id, state)
+    return state
 
 
 def require_role(*allowed_roles: int):

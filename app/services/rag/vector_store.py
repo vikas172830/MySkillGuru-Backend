@@ -19,7 +19,9 @@ from typing import Dict, List, Tuple
 
 from app.services.rag.schemas import Chunk, new_id
 
-COLLECTION = "lms_course_material_chunks"
+from app.core.config import settings
+
+COLLECTION = settings.QDRANT_COLLECTION
 CHUNK_SIZE_TOKENS = 450       # ~500 tokens with overlap headroom
 CHUNK_OVERLAP_TOKENS = 60
 

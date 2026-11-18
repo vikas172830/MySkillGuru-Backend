@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity
+from app.core.config import settings
+from app.core.redis_client import revoke_user_tokens
 from app.core.security import hash_password, verify_password
 from app.db.mongodb import get_database
 from app.models.user import serialize_doc
@@ -269,6 +271,8 @@ async def change_password(
         {"_id": ObjectId(user_id)},
         {"$set": {"password_hash": new_hash, "updated_at": datetime.now(timezone.utc)}},
     )
+    # A password change must kill every session issued before it.
+    await revoke_user_tokens(user_id, settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
 
     return {"message": "Password updated successfully"}
 

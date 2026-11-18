@@ -13,7 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.api.deps import get_current_identity, get_current_user
+from app.core.config import settings
 from app.core.rate_limit import login_rate_limit
+from app.core.redis_client import revoke_user_tokens
 from app.core.security import create_access_token, hash_password, set_access_cookie, unset_access_cookie, verify_password
 from app.db.mongodb import get_database
 from app.models.user import create_user_document, serialize_user
@@ -268,4 +270,6 @@ async def get_me(
 @router.post("/logout")
 async def logout(response: Response, identity: dict = Depends(get_current_identity)):
     unset_access_cookie(response)
+    # Invalidate the token server-side too, not just the browser cookie.
+    await revoke_user_tokens(identity["user_id"], settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60)
     return {"message": "Logged out successfully"}

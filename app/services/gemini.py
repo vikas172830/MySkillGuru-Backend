@@ -17,6 +17,7 @@ from google.genai import types as genai_types
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
+from app.utils.net import safe_get
 from app.utils.token_usage import increment_institute_gemini_tokens
 
 _client: genai.Client | None = None
@@ -420,9 +421,8 @@ async def extract_and_patch_question_paper_text(
     try:
         logging.info("[qp-extract] Downloading file for folder %s", folder_id)
 
-        resp = await asyncio.to_thread(requests.get, question_paper_url, timeout=60)
-        resp.raise_for_status()
-        file_bytes = resp.content
+        # SSRF-checked: rejects internal / cloud-metadata addresses and redirects.
+        file_bytes = await asyncio.to_thread(safe_get, question_paper_url, timeout=60)
 
         logging.info("[qp-extract] Extracting text for folder %s (type=%s)", folder_id, _file_ext(filename))
 
