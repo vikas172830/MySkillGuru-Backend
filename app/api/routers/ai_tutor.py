@@ -44,7 +44,8 @@ from app.services.gemini import (
 )
 # Shared provider-failover predicate — first introduced for roadmap
 # generation, reused here rather than duplicated.
-from app.services.roadmap_ai import is_gemini_quota_error
+from app.services.roadmap_ai import fence_user_text, is_gemini_quota_error
+from app.utils.uploads import read_upload_capped
 from app.services.imagekit import delete_imagekit_file, upload_file_to_imagekit
 from app.services.job_store import get_job, set_job, update_job
 from app.services.pdf_render import render_html_to_pdf
@@ -207,7 +208,7 @@ def _build_homework_prompt(prompt: str, extracted_text: str, homework_type: str,
     if extracted_text:
         homework_content = f"\n\nHOMEWORK CONTENT (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        homework_content += f"\n\nADDITIONAL INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        homework_content += fence_user_text("Additional Instructions From Student", prompt)
 
     return f"""You are an expert academic tutor helping a student with their homework.
     CURRENT DATE: {current_date}
@@ -284,7 +285,7 @@ def _build_notes_prompt(prompt: str, extracted_text: str, notes_type: str, notes
     if extracted_text:
         study_content += f"\n\nSTUDY MATERIAL (extracted from uploaded file):\n{extracted_text}"
     if prompt:
-        study_content += f"\n\nTOPIC / INSTRUCTIONS FROM STUDENT:\n{prompt}"
+        study_content += fence_user_text("Topic / Instructions From Student", prompt)
 
     return f"""You are an expert academic notes creator and study assistant.
 CURRENT DATE: {current_date}
@@ -433,7 +434,7 @@ async def _run_homework_job(
             params["prompt"], extracted_text, params["homeworkType"], params["responseStyle"]
         )
         claude_model = _CLAUDE_NOTES_MODEL
-        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 5000)
+        html_content, c_usage = await asyncio.to_thread(generate_html, full_prompt, claude_model, 16000)
         logging.info("[hw:%s] Claude done — %d tokens", job_id, c_usage["total_tokens"])
         await record_ai_usage(
             db, user_id=user_id, provider=Provider.CLAUDE, model=claude_model,
@@ -599,7 +600,7 @@ async def homework_help(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX, PNG, JPG, JPEG, WEBP."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
@@ -618,6 +619,8 @@ async def homework_help(
             "message": "Generation started. Poll /api/ai-tutor/homework-help/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("homework_help error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -689,7 +692,7 @@ async def generate_notes(
                 return JSONResponse(status_code=400, content={
                     "error": f"Unsupported file type '.{ext}'. Accepted: PDF, DOCX."
                 })
-            file_bytes = await file.read()
+            file_bytes = await read_upload_capped(file)
             filename = fname
 
         job_id = str(uuid.uuid4())
@@ -708,6 +711,8 @@ async def generate_notes(
             "message": "Generation started. Poll /api/ai-tutor/generate-notes/status/<jobId>.",
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error("generate_notes error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})

@@ -34,6 +34,7 @@ from app.models.ai_usage_event import Feature, Provider
 from app.services.ai_usage import record_ai_usage
 from app.services.gemini import extract_text_from_file
 from app.services.job_store import get_job, set_job, update_job
+from app.utils.uploads import read_upload_capped
 from app.services.rag import mongo_store, singletons, structure_parser, tree_index
 from app.services.rag.pdf_extract import extract_pdf_text
 from app.services.rag.schemas import DocType, DocumentRecord, SourceFormat, new_id
@@ -191,7 +192,7 @@ async def upload_course_material(
     course_code: Optional[str] = Form(None),
     identity: dict = Depends(get_current_identity),
 ):
-    file_bytes = await file.read()
+    file_bytes = await read_upload_capped(file)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
